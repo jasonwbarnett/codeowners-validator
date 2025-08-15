@@ -38,6 +38,13 @@ type ValidOwnerConfig struct {
 	AllowUnownedPatterns bool `envconfig:"default=true"`
 	// OwnersMustBeTeams specifies whether owners must be teams in the same org as the repository
 	OwnersMustBeTeams bool `envconfig:"default=false"`
+	// AllowCrossOrgTeams specifies whether teams from different organizations are allowed.
+	// When set to true, the validator will:
+	// - Skip the organization membership check
+	// - Validate team existence in their actual organization  
+	// - Skip permission checks for cross-org teams (can't verify across orgs)
+	// This is useful during transitions between organizations.
+	AllowCrossOrgTeams bool `envconfig:"default=false"`
 }
 
 // ValidOwner validates each owner
@@ -51,6 +58,7 @@ type ValidOwner struct {
 	ignOwners            map[string]struct{}
 	allowUnownedPatterns bool
 	ownersMustBeTeams    bool
+	allowCrossOrgTeams   bool
 }
 
 // NewValidOwner returns new instance of the ValidOwner
@@ -73,6 +81,7 @@ func NewValidOwner(cfg ValidOwnerConfig, ghClient *github.Client, checkScopes bo
 		ignOwners:            ignOwners,
 		allowUnownedPatterns: cfg.AllowUnownedPatterns,
 		ownersMustBeTeams:    cfg.OwnersMustBeTeams,
+		allowCrossOrgTeams:   cfg.AllowCrossOrgTeams,
 	}, nil
 }
 
@@ -171,23 +180,32 @@ func (v *ValidOwner) selectValidateFn(name string) func(context.Context, string)
 }
 
 func (v *ValidOwner) initOrgListTeams(ctx context.Context) *validateError {
+	teams, err := v.fetchTeamsForOrg(ctx, v.orgName)
+	if err != nil {
+		return err
+	}
+	v.orgTeams = teams
+	return nil
+}
+
+func (v *ValidOwner) fetchTeamsForOrg(ctx context.Context, orgName string) ([]*github.Team, *validateError) {
 	var teams []*github.Team
 	req := &github.ListOptions{
 		PerPage: 100,
 	}
 	for {
-		resultPage, resp, err := v.ghClient.Teams.ListTeams(ctx, v.orgName, req)
+		resultPage, resp, err := v.ghClient.Teams.ListTeams(ctx, orgName, req)
 		if err != nil { // TODO(mszostok): implement retry?
 			switch err := err.(type) {
 			case *github.ErrorResponse:
 				if err.Response.StatusCode == http.StatusUnauthorized {
-					return newValidateError("Teams for organization %q could not be queried. Requires GitHub authorization.", v.orgName)
+					return nil, newValidateError("Teams for organization %q could not be queried. Requires GitHub authorization.", orgName)
 				}
-				return newValidateError("HTTP error occurred while calling GitHub: %v", err)
+				return nil, newValidateError("HTTP error occurred while calling GitHub: %v", err)
 			case *github.RateLimitError:
-				return newValidateError("GitHub rate limit reached: %v", err.Message)
+				return nil, newValidateError("GitHub rate limit reached: %v", err.Message)
 			default:
-				return newValidateError("Unknown error occurred while calling GitHub: %v", err)
+				return nil, newValidateError("Unknown error occurred while calling GitHub: %v", err)
 			}
 		}
 		teams = append(teams, resultPage...)
@@ -197,18 +215,10 @@ func (v *ValidOwner) initOrgListTeams(ctx context.Context) *validateError {
 		req.Page = resp.NextPage
 	}
 
-	v.orgTeams = teams
-
-	return nil
+	return teams, nil
 }
 
 func (v *ValidOwner) validateTeam(ctx context.Context, name string) *validateError {
-	if v.orgTeams == nil {
-		if err := v.initOrgListTeams(ctx); err != nil {
-			return err.AsPermanent()
-		}
-	}
-
 	// called after validation it's safe to work on `parts` slice
 	parts := strings.SplitN(name, "/", 2)
 	org := parts[0]
@@ -216,14 +226,40 @@ func (v *ValidOwner) validateTeam(ctx context.Context, name string) *validateErr
 	team := parts[1]
 
 	// GitHub normalizes name before comparison
-	if !strings.EqualFold(org, v.orgName) {
+	// Skip org check if cross-org teams are allowed
+	if !v.allowCrossOrgTeams && !strings.EqualFold(org, v.orgName) {
 		return newValidateError("Team %q does not belong to %q organization.", name, v.orgName)
 	}
 
+	// Determine which organization's teams to check
+	targetOrg := v.orgName
+	if v.allowCrossOrgTeams {
+		targetOrg = org // Use the team's actual organization
+	}
+
+	// If we're checking a different org than what's cached, we need to fetch those teams
+	var teamsToCheck []*github.Team
+	if strings.EqualFold(targetOrg, v.orgName) {
+		// Check against the repository's org (use cached teams)
+		if v.orgTeams == nil {
+			if err := v.initOrgListTeams(ctx); err != nil {
+				return err.AsPermanent()
+			}
+		}
+		teamsToCheck = v.orgTeams
+	} else {
+		// Need to fetch teams from the different organization
+		var err *validateError
+		teamsToCheck, err = v.fetchTeamsForOrg(ctx, targetOrg)
+		if err != nil {
+			return err.AsPermanent()
+		}
+	}
+
 	teamExists := func() bool {
-		for _, v := range v.orgTeams {
+		for _, t := range teamsToCheck {
 			// GitHub normalizes name before comparison
-			if strings.EqualFold(v.GetSlug(), team) {
+			if strings.EqualFold(t.GetSlug(), team) {
 				return true
 			}
 		}
@@ -231,7 +267,13 @@ func (v *ValidOwner) validateTeam(ctx context.Context, name string) *validateErr
 	}
 
 	if !teamExists() {
-		return newValidateError("Team %q does not exist in organization %q.", name, org)
+		return newValidateError("Team %q does not exist in organization %q.", name, targetOrg)
+	}
+
+	// Skip permissions check for cross-org teams
+	// We can't verify permissions for teams in other organizations
+	if v.allowCrossOrgTeams && !strings.EqualFold(org, v.orgName) {
+		return nil
 	}
 
 	// repo contains the permissions for the team slug given

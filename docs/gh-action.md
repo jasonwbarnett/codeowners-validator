@@ -89,6 +89,12 @@ jobs:
           # Specifies whether only teams are allowed as owners of files.
           owner_checker_owners_must_be_teams: "false"
 
+          # Specifies whether teams from different organizations are allowed. When set to true, 
+          # the validator will: skip the organization check, validate team existence in their 
+          # actual organization, and skip permission checks for cross-org teams (as permissions 
+          # can't be verified across orgs). This is useful during transitions between organizations.
+          owner_checker_allow_cross_org_teams: "false"
+
           # Only check listed subdirectories for CODEOWNERS ownership that don't have owners.
           not_owned_checker_subdirectories: ""
 ```

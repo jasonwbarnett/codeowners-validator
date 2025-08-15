@@ -69,6 +69,11 @@ inputs:
     default: "false"
     required: false
 
+  owner_checker_allow_cross_org_teams:
+    description: "Specifies whether teams from different organizations are allowed. When set to true, the validator will: skip the organization check, validate team existence in their actual organization, and skip permission checks for cross-org teams (as permissions can't be verified across orgs). This is useful during transitions between organizations."
+    default: "false"
+    required: false
+
   not_owned_checker_subdirectories:
     description: "Only check listed subdirectories for CODEOWNERS ownership that don't have owners."
     required: false

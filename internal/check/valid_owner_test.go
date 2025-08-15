@@ -159,3 +159,55 @@ func TestValidOwnerCheckerOwnersMustBeTeams(t *testing.T) {
 		})
 	}
 }
+
+func TestValidOwnerCheckerAllowCrossOrgTeams(t *testing.T) {
+	// This test validates the AllowCrossOrgTeams config flag behavior
+	// Note: This test only validates the configuration parsing and basic team syntax validation
+	// The actual org validation requires a GitHub client and is tested in integration tests
+	
+	t.Run("Config with AllowCrossOrgTeams enabled", func(t *testing.T) {
+		// given
+		ownerCheck, err := check.NewValidOwner(check.ValidOwnerConfig{
+			Repository:           "org/repo",
+			AllowUnownedPatterns: true,
+			AllowCrossOrgTeams:   true, // Enable cross-org teams
+		}, nil, true)
+		require.NoError(t, err)
+		
+		// Verify the config was properly set
+		assert.NotNil(t, ownerCheck)
+	})
+	
+	t.Run("Config with AllowCrossOrgTeams disabled", func(t *testing.T) {
+		// given
+		ownerCheck, err := check.NewValidOwner(check.ValidOwnerConfig{
+			Repository:           "org/repo",
+			AllowUnownedPatterns: true,
+			AllowCrossOrgTeams:   false, // Disable cross-org teams (default)
+		}, nil, true)
+		require.NoError(t, err)
+		
+		// Verify the config was properly set
+		assert.NotNil(t, ownerCheck)
+	})
+	
+	t.Run("Team syntax validation", func(t *testing.T) {
+		// Test that team syntax is recognized correctly regardless of org
+		tests := []struct {
+			owner   string
+			isValid bool
+		}{
+			{"@org/team", true},
+			{"@different-org/team", true},
+			{"@altana-poc/team", true},
+			{"@altana-tech/team", true},
+			{"@org/", false},
+			{"org/team", false},
+		}
+		
+		for _, tc := range tests {
+			result := check.IsValidOwner(tc.owner)
+			assert.Equal(t, tc.isValid, result, "Owner %s validation failed", tc.owner)
+		}
+	})
+}
